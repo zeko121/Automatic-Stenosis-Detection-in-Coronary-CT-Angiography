@@ -1,0 +1,13 @@
+# Git LFS
+*.pth filter=lfs diff=lfs merge=lfs -text
+# Ensure consistent line endings
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+# Binary files
+*.pth binary
+*.nii.gz binary
+*.dcm binary
