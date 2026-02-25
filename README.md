@@ -2,7 +2,7 @@
 
 Automated coronary artery stenosis detection from Cardiac CT Angiography (CCTA) scans. This system combines supervised deep learning for vessel segmentation with unsupervised computational geometry for stenosis measurement, delivered as a desktop application.
 
-Developed at the University of Haifa, Department of Information Systems, in collaboration with Ziv Medical Center.
+Developed at the University of Haifa, Department of Information Systems, Supervised by Prof.Mario Boley, in collaboration with Ziv Medical Center.
 
 ---
 
@@ -27,63 +27,7 @@ DICOM/NIfTI  →  Preprocess  →  Segment  →  Post-process  →  Centerline  
 
 ---
 
-## Project Structure
-
-```
-stenosis-detection/
-├── app_qt.py              # PySide6 desktop application — main entry point
-├── pipeline/              # Eight-stage processing pipeline
-│   ├── __init__.py
-│   ├── dicom_to_nifti.py  # DICOM folder → NIfTI volume
-│   ├── preprocess.py      # Normalization, resampling, orientation alignment
-│   ├── segment.py         # 3D U-Net inference (sliding window)
-│   ├── postprocess.py     # Binary mask cleanup
-│   ├── centerline.py      # Vessel skeleton extraction and radius measurement
-│   ├── label_arteries.py  # Left/right coronary artery identification
-│   ├── stenosis.py        # Stenosis detection and severity grading
-│   ├── visualize.py       # 3D Plotly visualization and JSON report
-│   ├── runner.py          # Pipeline orchestrator
-│   ├── compare_gt.py      # Ground truth comparison utilities
-│   ├── endpoint_classifier.py
-│   ├── gap_connector.py
-│   ├── region_helpers.py
-│   ├── refine_segmentation.py
-│   └── resegment.py
-├── widgets/               # Qt UI components
-│   ├── plotly_bridge.py   # Qt–Plotly HTML bridge
-│   ├── slice_viewer_widget.py
-│   └── splash_screen.py
-├── evaluation/            # Four-tier evaluation framework
-│   ├── config.py          # Environment detection and path configuration
-│   ├── run_evaluation.py  # CLI orchestrator
-│   ├── tier1_segmentation.py   # Dice, surface Dice, HD95
-│   ├── tier2_structural.py     # Centerline and topology metrics
-│   ├── tier3_downstream.py     # Stenosis detection performance
-│   ├── tier4_robustness.py     # Cross-scanner and edge-case robustness
-│   ├── composite_score.py      # Weighted composite across tiers
-│   └── report_generator.py
-├── models/                # Trained model checkpoints (Git LFS)
-│   └── {run_id}/
-│       ├── checkpoints/
-│       │   └── best_model.pth
-│       └── run_config.json
-├── data/                  # Input data directory
-│   ├── imageCAS/          # ImageCAS dataset (training/evaluation)
-│   └── ZIV/               # Ziv Medical Center CCTA cases
-└── tests/                 # Test suite
-    ├── test_pipeline/     # Per-stage unit tests
-    └── humanization/      # Snapshot regression tests
-```
-
 ---
-
-## Setup and Installation
-
-**Requirements**: Python 3.10 or later.
-
-```bash
-pip install -r requirements.txt
-```
 
 ### Model Placement
 
@@ -233,4 +177,4 @@ All preprocessing is configured from the model's `run_config.json`. Default trai
 
 **Clinical collaboration**: Ziv Medical Center, Safed — radiologists who provided CCTA data and ground truth annotations
 
-**Training dataset**: ImageCAS (1,000 annotated CCTA volumes) — used under academic license for training and evaluation
+**Training dataset**: ImageCAS (1,000 annotated CCTA volumes) 
