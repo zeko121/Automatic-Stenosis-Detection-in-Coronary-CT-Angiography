@@ -268,7 +268,7 @@ def pipeline_stages(input_path, enable_postprocess=True, enable_refinement=False
         if enable_refinement:
             log("\n[Re-segmentation] Attempting to reconnect vessel fragments...")
             try:
-                from pipeline.refine_segmentation import refine_mask
+                from pipeline.gap_reconnection.refine_segmentation import refine_mask
                 import zarr as _zarr_ref
                 _seg_group = _zarr_ref.open_group(str(segmented_path), mode='r')
                 _seg_mask = _seg_group['mask'][:]

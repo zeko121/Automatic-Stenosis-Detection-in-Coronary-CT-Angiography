@@ -8,7 +8,7 @@ from scipy.ndimage import label as scipy_label
 from skimage.graph import route_through_array
 from skimage.morphology import remove_small_objects
 
-from pipeline.gap_connector import GapPair
+from pipeline.gap_reconnection.gap_connector import GapPair
 
 logger = logging.getLogger(__name__)
 

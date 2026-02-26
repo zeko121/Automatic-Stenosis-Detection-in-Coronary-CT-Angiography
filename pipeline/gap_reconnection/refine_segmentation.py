@@ -8,11 +8,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from pipeline.endpoint_classifier import EndpointInfo, classify_endpoints
-from pipeline.gap_connector import (
+from pipeline.gap_reconnection.endpoint_classifier import EndpointInfo, classify_endpoints
+from pipeline.gap_reconnection.gap_connector import (
     GapPair, find_gap_pairs, find_midpoint_gap_pairs, prepare_gap_rois,
 )
-from pipeline.resegment import resegment_gaps, merge_predictions
+from pipeline.gap_reconnection.resegment import resegment_gaps, merge_predictions
 from pipeline.segment import load_model
 
 logger = logging.getLogger(__name__)

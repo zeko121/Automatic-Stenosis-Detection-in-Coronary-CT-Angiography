@@ -25,6 +25,9 @@ env/
 Thumbs.db
 desktop.ini
 
+# Tests
+tests/
+
 # Project-specific
 temp/
 *.zarr/

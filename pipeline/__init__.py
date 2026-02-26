@@ -7,7 +7,7 @@ from pipeline import stenosis
 from pipeline import visualize
 from pipeline import slice_viewer
 from pipeline import runner
-from pipeline import refine_segmentation
+from pipeline.gap_reconnection import refine_segmentation
 from pipeline import label_arteries
 from pipeline import compare_gt
 

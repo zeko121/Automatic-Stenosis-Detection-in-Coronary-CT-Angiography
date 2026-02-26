@@ -8,7 +8,7 @@ from scipy.ndimage import distance_transform_edt, label as scipy_label
 from scipy.spatial import KDTree
 from skimage.morphology import skeletonize
 
-from pipeline.endpoint_classifier import EndpointInfo
+from pipeline.gap_reconnection.endpoint_classifier import EndpointInfo
 
 logger = logging.getLogger(__name__)
 
