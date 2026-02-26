@@ -28,5 +28,6 @@ desktop.ini
 # Project-specific
 temp/
 *.zarr/
+!data/ziv/exampleCase.zarr/
 *.log
 .env
