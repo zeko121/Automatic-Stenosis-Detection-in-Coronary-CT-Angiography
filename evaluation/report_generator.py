@@ -105,7 +105,47 @@ def generate_markdown_report(
     lines.append(_tier_table(ranked_models, "tier3_raw", t3a_keys))
     lines.append("")
 
-    lines.append("### 3b — Ziv Real-World Evaluation")
+    lines.append("### 3b-i — Per-Side Evaluation (Primary)")
+    lines.append("")
+    lines.append("Per-side (Left/Right coronary) metrics are the primary real-world")
+    lines.append("evaluation. Side assignment is reliable; sub-artery labeling (LAD/LCx) is not.")
+    lines.append("")
+
+    t3b_side_keys = [
+        ("ziv_side_sensitivity", "Side Sensitivity", ".0%"),
+        ("ziv_side_specificity", "Side Specificity", ".0%"),
+        ("ziv_side_max_severity_agreement", "Max Severity Agreement", ".0%"),
+        ("ziv_side_cohens_kappa", "Side Cohen's Kappa", ".2f"),
+        ("ziv_n_cases", "N Cases", "d"),
+    ]
+
+    lines.append(_tier_table(ranked_models, "tier3_raw", t3b_side_keys))
+    lines.append("")
+
+    # side-level CIs
+    side_ci_rows = []
+    for m in ranked_models:
+        t3 = m.tier3_raw
+        sens_ci = t3.get("ziv_side_sensitivity_ci", [0, 0])
+        spec_ci = t3.get("ziv_side_specificity_ci", [0, 0])
+        if isinstance(sens_ci, (list, tuple)) and len(sens_ci) == 2:
+            side_ci_rows.append([
+                m.model_name,
+                f"{sens_ci[0]:.0%} - {sens_ci[1]:.0%}",
+                f"{spec_ci[0]:.0%} - {spec_ci[1]:.0%}",
+            ])
+    if side_ci_rows:
+        lines.append("**95% Bootstrap CIs (Per-Side):**")
+        lines.append("")
+        lines.append(_md_table(
+            headers=["Model", "Side Sensitivity CI", "Side Specificity CI"],
+            rows=side_ci_rows,
+        ))
+        lines.append("")
+
+    lines.append("### 3b-ii — Per-Artery Evaluation (Supplementary)")
+    lines.append("")
+    lines.append("Sub-artery labeling (LAD/LCx) is unreliable; per-side metrics above are primary.")
     lines.append("")
 
     t3b_keys = [
@@ -120,6 +160,7 @@ def generate_markdown_report(
     lines.append(_tier_table(ranked_models, "tier3_raw", t3b_keys))
     lines.append("")
 
+    # per-artery CIs
     ci_rows = []
     for m in ranked_models:
         t3 = m.tier3_raw
@@ -132,7 +173,7 @@ def generate_markdown_report(
                 f"{spec_ci[0]:.0%} - {spec_ci[1]:.0%}",
             ])
     if ci_rows:
-        lines.append("**95% Bootstrap CIs:**")
+        lines.append("**95% Bootstrap CIs (Per-Artery):**")
         lines.append("")
         lines.append(_md_table(
             headers=["Model", "Sensitivity CI", "Specificity CI"],

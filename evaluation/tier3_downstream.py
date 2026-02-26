@@ -74,6 +74,14 @@ class Tier3Metrics:
     ziv_sensitivity_ci: Tuple[float, float] = (0.0, 0.0)
     ziv_specificity_ci: Tuple[float, float] = (0.0, 0.0)
 
+    # 3b side-level (primary)
+    ziv_side_sensitivity: float = 0.0
+    ziv_side_specificity: float = 0.0
+    ziv_side_max_severity_agreement: float = 0.0
+    ziv_side_cohens_kappa: float = 0.0
+    ziv_side_sensitivity_ci: Tuple[float, float] = (0.0, 0.0)
+    ziv_side_specificity_ci: Tuple[float, float] = (0.0, 0.0)
+
     def to_dict(self) -> dict:
         return {
             "model_name": self.model_name,
@@ -91,6 +99,12 @@ class Tier3Metrics:
             "ziv_n_cases": self.ziv_n_cases,
             "ziv_sensitivity_ci": list(self.ziv_sensitivity_ci),
             "ziv_specificity_ci": list(self.ziv_specificity_ci),
+            "ziv_side_sensitivity": self.ziv_side_sensitivity,
+            "ziv_side_specificity": self.ziv_side_specificity,
+            "ziv_side_max_severity_agreement": self.ziv_side_max_severity_agreement,
+            "ziv_side_cohens_kappa": self.ziv_side_cohens_kappa,
+            "ziv_side_sensitivity_ci": list(self.ziv_side_sensitivity_ci),
+            "ziv_side_specificity_ci": list(self.ziv_side_specificity_ci),
         }
 
 
@@ -355,6 +369,18 @@ def _specificity_from_cases(case_results: List[dict]) -> float:
     return tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
 
+def _side_sensitivity_from_cases(case_results: List[dict]) -> float:
+    tp = sum(c.get("side_tp", 0) for c in case_results)
+    fn = sum(c.get("side_fn", 0) for c in case_results)
+    return tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+
+def _side_specificity_from_cases(case_results: List[dict]) -> float:
+    tn = sum(c.get("side_tn", 0) for c in case_results)
+    fp = sum(c.get("side_fp", 0) for c in case_results)
+    return tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
+
 def evaluate_ziv_cases(
     case_comparisons: List["ComparisonResult"],
     n_bootstrap: int = 1000,
@@ -365,11 +391,29 @@ def evaluate_ziv_cases(
     if not case_comparisons:
         return {}
 
+    from pipeline.compare_gt import compute_side_cohens_kappa
+
     all_artery_comps = []
+    all_side_comps = []
     case_dicts = []
 
     for cr in case_comparisons:
         all_artery_comps.extend(cr.artery_comparisons)
+        all_side_comps.extend(cr.side_comparisons)
+
+        # tally per-case side TP/TN/FP/FN
+        s_tp = s_tn = s_fp = s_fn = 0
+        for sc in cr.side_comparisons:
+            cls = sc.any_positive_classification
+            if cls == "TP":
+                s_tp += 1
+            elif cls == "TN":
+                s_tn += 1
+            elif cls == "FP":
+                s_fp += 1
+            elif cls == "FN":
+                s_fn += 1
+
         case_dicts.append({
             "true_positives": cr.true_positives,
             "true_negatives": cr.true_negatives,
@@ -377,8 +421,13 @@ def evaluate_ziv_cases(
             "false_negatives": cr.false_negatives,
             "agreement_rate": cr.agreement_rate,
             "within_one_grade_rate": cr.within_one_grade_rate,
+            "side_tp": s_tp,
+            "side_tn": s_tn,
+            "side_fp": s_fp,
+            "side_fn": s_fn,
         })
 
+    # per-artery point estimates
     tp = sum(d["true_positives"] for d in case_dicts)
     tn = sum(d["true_negatives"] for d in case_dicts)
     fp = sum(d["false_positives"] for d in case_dicts)
@@ -389,12 +438,36 @@ def evaluate_ziv_cases(
     agreement = float(np.mean([d["agreement_rate"] for d in case_dicts]))
     within_one = float(np.mean([d["within_one_grade_rate"] for d in case_dicts]))
 
+    # per-artery bootstrap CIs
     _, sens_ci = bootstrap_metric(case_dicts, _sensitivity_from_cases,
                                    n_bootstrap, ci, seed)
     _, spec_ci = bootstrap_metric(case_dicts, _specificity_from_cases,
                                    n_bootstrap, ci, seed)
 
     kappa = compute_cohens_kappa(all_artery_comps)
+
+    # side-level point estimates
+    side_tp = sum(d["side_tp"] for d in case_dicts)
+    side_tn = sum(d["side_tn"] for d in case_dicts)
+    side_fp = sum(d["side_fp"] for d in case_dicts)
+    side_fn = sum(d["side_fn"] for d in case_dicts)
+
+    side_sensitivity = side_tp / (side_tp + side_fn) if (side_tp + side_fn) > 0 else 0.0
+    side_specificity = side_tn / (side_tn + side_fp) if (side_tn + side_fp) > 0 else 0.0
+
+    # side max-severity agreement
+    side_max_matches = sum(1 for sc in all_side_comps if sc.max_severity_match)
+    side_max_severity_agreement = (
+        side_max_matches / len(all_side_comps) if all_side_comps else 0.0
+    )
+
+    # side-level bootstrap CIs
+    _, side_sens_ci = bootstrap_metric(case_dicts, _side_sensitivity_from_cases,
+                                        n_bootstrap, ci, seed)
+    _, side_spec_ci = bootstrap_metric(case_dicts, _side_specificity_from_cases,
+                                        n_bootstrap, ci, seed)
+
+    side_kappa = compute_side_cohens_kappa(all_side_comps)
 
     return {
         "sensitivity": sensitivity,
@@ -406,6 +479,12 @@ def evaluate_ziv_cases(
         "cohens_kappa": kappa,
         "n_cases": len(case_comparisons),
         "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "side_sensitivity": side_sensitivity,
+        "side_specificity": side_specificity,
+        "side_max_severity_agreement": side_max_severity_agreement,
+        "side_cohens_kappa": side_kappa,
+        "side_sensitivity_ci": side_sens_ci,
+        "side_specificity_ci": side_spec_ci,
     }
 
 
@@ -465,5 +544,13 @@ def build_tier3_metrics(
         m.ziv_n_cases = ziv_results.get("n_cases", 0)
         m.ziv_sensitivity_ci = tuple(ziv_results.get("sensitivity_ci", (0.0, 0.0)))
         m.ziv_specificity_ci = tuple(ziv_results.get("specificity_ci", (0.0, 0.0)))
+
+        # side-level metrics (primary)
+        m.ziv_side_sensitivity = ziv_results.get("side_sensitivity", 0.0)
+        m.ziv_side_specificity = ziv_results.get("side_specificity", 0.0)
+        m.ziv_side_max_severity_agreement = ziv_results.get("side_max_severity_agreement", 0.0)
+        m.ziv_side_cohens_kappa = ziv_results.get("side_cohens_kappa", 0.0)
+        m.ziv_side_sensitivity_ci = tuple(ziv_results.get("side_sensitivity_ci", (0.0, 0.0)))
+        m.ziv_side_specificity_ci = tuple(ziv_results.get("side_specificity_ci", (0.0, 0.0)))
 
     return m

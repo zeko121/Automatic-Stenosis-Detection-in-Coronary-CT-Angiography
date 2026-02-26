@@ -71,8 +71,13 @@ def normalize_tier2(tier2_agg: Dict[str, float]) -> float:
 
 
 def normalize_tier3(tier3_dict: Dict[str, float]) -> float:
-    ziv_sens = tier3_dict.get("ziv_sensitivity", 0.0)
-    ziv_spec = tier3_dict.get("ziv_specificity", 0.0)
+    # side-level is primary; fall back to per-artery if not computed (None)
+    ziv_sens = tier3_dict.get("ziv_side_sensitivity")
+    if ziv_sens is None:
+        ziv_sens = tier3_dict.get("ziv_sensitivity", 0.0)
+    ziv_spec = tier3_dict.get("ziv_side_specificity")
+    if ziv_spec is None:
+        ziv_spec = tier3_dict.get("ziv_specificity", 0.0)
     oracle_agree = tier3_dict.get("oracle_severity_agreement", 0.0)
     miss_rate = tier3_dict.get("oracle_miss_rate", 0.0)
     halluc_rate = tier3_dict.get("oracle_hallucination_rate", 0.0)
@@ -134,7 +139,9 @@ def rank_models(
             ms.tier1_score, ms.tier2_score, ms.tier3_score, ms.tier4_score, weights
         )
 
-        ms.ziv_sensitivity = t3.get("ziv_sensitivity", 0.0)
+        # prefer side-level sensitivity when available
+        ziv_side = t3.get("ziv_side_sensitivity")
+        ms.ziv_sensitivity = ziv_side if ziv_side is not None else t3.get("ziv_sensitivity", 0.0)
         ms.surface_dice_05mm = t1.get("surface_dice_0.5mm_mean", 0.0)
         ms.n_bifurcations = t2.get("n_bifurcations_mean", 0.0)
 
