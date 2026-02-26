@@ -1,0 +1,190 @@
+{
+  "coronary_findings": {
+    "LM": {
+      "artery": "LM",
+      "segment": "ostial",
+      "stenosis_percent": 30.0,
+      "severity": "Mild",
+      "severity_code": 1,
+      "plaque_type": "calcified",
+      "plaque_pattern": "focal",
+      "is_normal": false
+    },
+    "LAD_prox": {
+      "artery": "LAD",
+      "segment": "prox",
+      "stenosis_percent": 40.0,
+      "severity": "Mild",
+      "severity_code": 1,
+      "plaque_type": "mixed",
+      "plaque_pattern": "diffuse",
+      "is_normal": false
+    },
+    "LAD_mid": {
+      "artery": "LAD",
+      "segment": "mid",
+      "stenosis_percent": 75.0,
+      "severity": "Severe",
+      "severity_code": 3,
+      "plaque_type": "calcified",
+      "plaque_pattern": "diffuse",
+      "is_normal": false
+    },
+    "D1": {
+      "artery": "D1",
+      "segment": null,
+      "stenosis_percent": 0.0,
+      "severity": "Normal",
+      "severity_code": 0,
+      "plaque_type": null,
+      "plaque_pattern": null,
+      "is_normal": true
+    },
+    "LCX": {
+      "artery": "LCX",
+      "segment": null,
+      "stenosis_percent": 0.0,
+      "severity": "Normal",
+      "severity_code": 0,
+      "plaque_type": null,
+      "plaque_pattern": null,
+      "is_normal": true
+    },
+    "RCA": {
+      "artery": "RCA",
+      "segment": null,
+      "stenosis_percent": 0.0,
+      "severity": "Normal",
+      "severity_code": 0,
+      "plaque_type": null,
+      "plaque_pattern": null,
+      "is_normal": true
+    },
+    "PDA": {
+      "artery": "PDA",
+      "segment": null,
+      "stenosis_percent": 0.0,
+      "severity": "Normal",
+      "severity_code": 0,
+      "plaque_type": null,
+      "plaque_pattern": null,
+      "is_normal": true
+    }
+  },
+  "training_labels": {
+    "arteries": {
+      "LM": {
+        "stenosis_percent": 30.0,
+        "severity": 1,
+        "severity_name": "Mild",
+        "is_normal": false
+      },
+      "LAD": {
+        "stenosis_percent": 75.0,
+        "severity": 3,
+        "severity_name": "Severe",
+        "is_normal": false
+      },
+      "D1": {
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "is_normal": true
+      },
+      "LCX": {
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "is_normal": true
+      },
+      "RCA": {
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "is_normal": true
+      },
+      "PDA": {
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "is_normal": true
+      }
+    },
+    "segments": {
+      "LM": {
+        "artery": "LM",
+        "segment": "ostial",
+        "stenosis_percent": 30.0,
+        "severity": 1,
+        "severity_name": "Mild",
+        "plaque_type": "calcified",
+        "is_normal": false
+      },
+      "LAD_prox": {
+        "artery": "LAD",
+        "segment": "prox",
+        "stenosis_percent": 40.0,
+        "severity": 1,
+        "severity_name": "Mild",
+        "plaque_type": "mixed",
+        "is_normal": false
+      },
+      "LAD_mid": {
+        "artery": "LAD",
+        "segment": "mid",
+        "stenosis_percent": 75.0,
+        "severity": 3,
+        "severity_name": "Severe",
+        "plaque_type": "calcified",
+        "is_normal": false
+      },
+      "D1": {
+        "artery": "D1",
+        "segment": null,
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "plaque_type": null,
+        "is_normal": true
+      },
+      "LCX": {
+        "artery": "LCX",
+        "segment": null,
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "plaque_type": null,
+        "is_normal": true
+      },
+      "RCA": {
+        "artery": "RCA",
+        "segment": null,
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "plaque_type": null,
+        "is_normal": true
+      },
+      "PDA": {
+        "artery": "PDA",
+        "segment": null,
+        "stenosis_percent": 0.0,
+        "severity": 0,
+        "severity_name": "Normal",
+        "plaque_type": null,
+        "is_normal": true
+      }
+    },
+    "max_stenosis_percent": 75.0,
+    "max_severity": 3,
+    "max_severity_name": "Severe",
+    "has_significant_stenosis": true,
+    "has_severe_stenosis": true,
+    "arteries_with_stenosis": [
+      "LAD"
+    ],
+    "arteries_with_severe_stenosis": [
+      "LAD"
+    ]
+  }
+}
