@@ -9,6 +9,9 @@ models/
 ├── 2025-12-31_02-53-53/
 │   ├── run_config.json
 │   └── checkpoints/best_model.pth
+├── 2026-01-03_04-24-10/
+│   ├── run_config.json
+│   └── checkpoints/best_model.pth
 └── 2026-02-12_13-14-10/
     ├── run_config.json
     └── checkpoints/best_model.pth
@@ -60,7 +63,44 @@ Preprocessing parameters for this model are not fully enumerated in `run_config.
 
 ---
 
-## Model 2: 2026-02-12_13-14-10 — BCE-Only High-Recall Model
+## Model 2: 2026-01-03_04-24-10 — Attention U-Net Model
+
+**Run name**: `attention_unet_model`
+**Description**: MONAI Attention U-Net 3D with attention gates, trained with Dice + BCE loss.
+
+> **Note:** This model is significantly heavier than the standard U-Net variants. It requires a capable GPU with sufficient VRAM and is better suited for Google Colab or modern/high-end GPUs. Not recommended for low-VRAM cards like the GTX 1650.
+
+### Architecture
+
+| Parameter      | Value                        |
+|----------------|------------------------------|
+| Model type     | MONAI Attention U-Net 3D     |
+| In channels    | 1 (grayscale CT)             |
+| Out channels   | 1 (binary vessel mask)       |
+| Feature channels | [32, 64, 128, 256, 512]    |
+| Strides        | [2, 2, 2, 2]                 |
+| Residual units | 2 per block                  |
+| Attention gates| Enabled                      |
+| Dropout        | 0.1                          |
+| Patch size     | 160 x 160 x 160              |
+
+### Performance
+
+- **82.57% Dice** (best validation, epoch 95)
+
+### Preprocessing Parameters
+
+| Parameter         | Value              |
+|-------------------|--------------------|
+| HU window         | [-50, 700]         |
+| Target spacing    | 0.5 mm isotropic   |
+| Orientation       | RAS                |
+| Z-score clip      | [-3.0, 3.0]        |
+| Mask threshold    | 0.3                |
+
+---
+
+## Model 3: 2026-02-12_13-14-10 — BCE-Only High-Recall Model
 
 **Run name**: `BCE_ONLY`
 **Description**: MONAI 3D U-Net trained with BCE-only loss, designed to maximize recall at the cost of some precision. Intended to be paired with post-processing to remove false positives.
