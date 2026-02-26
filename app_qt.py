@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QLabel, QTabWidget, QTextEdit, QGroupBox, QFrame,
-    QFileDialog, QMessageBox, QCheckBox,
+    QFileDialog, QMessageBox, QCheckBox, QComboBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtGui import QFont, QColor, QIcon
@@ -27,7 +27,7 @@ from PySide6.QtWebEngineCore import QWebEngineSettings
 from PySide6.QtWebChannel import QWebChannel
 
 from pipeline.runner import (
-    PIPELINE_STAGES, MODEL_DIR, TEMP_DIR,
+    PIPELINE_STAGES, TEMP_DIR,
     detect_input_type, generate_clinical_report,
     pipeline_stages,
 )
@@ -99,11 +99,12 @@ class PipelineWorker(QThread):
     cancelled = Signal()                    # emitted when cancelled
 
     def __init__(self, input_path: str, enable_postprocess: bool = True,
-                 enable_refinement: bool = False, parent=None):
+                 enable_refinement: bool = False, model_dir=None, parent=None):
         super().__init__(parent)
         self.input_path = input_path
         self.enable_postprocess = enable_postprocess
         self.enable_refinement = enable_refinement
+        self.model_dir = model_dir
         self._cancel_requested = False
 
     def cancel(self):
@@ -115,6 +116,7 @@ class PipelineWorker(QThread):
                 self.input_path,
                 enable_postprocess=self.enable_postprocess,
                 enable_refinement=self.enable_refinement,
+                model_dir=self.model_dir,
             ):
                 if self._cancel_requested:
                     self.cancelled.emit()
@@ -212,6 +214,16 @@ def discover_gt_report(input_path: str):
     """Find and load the GT report JSON for a Ziv case, or return None."""
     path = Path(input_path).resolve()
 
+    # zarr input: look for sibling <stem>Report.json
+    if path.suffix.lower() == '.zarr':
+        report_path = path.parent / f"{path.stem}Report.json"
+        if report_path.exists():
+            try:
+                with open(report_path, "r") as f:
+                    return _json.load(f)
+            except Exception:
+                pass
+
     case_id = None
     for part in path.parts:
         if re.match(r"^case-\d+$", part):
@@ -253,6 +265,44 @@ def discover_gt_report(input_path: str):
             return _json.load(f)
     except Exception:
         return None
+
+
+def discover_models():
+    """Scan models/ for valid model directories and return (label, Path) list."""
+    models_root = Path(__file__).resolve().parent / "models"
+    results = []
+    if not models_root.exists():
+        return results
+    for d in sorted(models_root.iterdir()):
+        if not d.is_dir():
+            continue
+        cfg_path = d / "run_config.json"
+        ckpt_path = d / "checkpoints" / "best_model.pth"
+        if not cfg_path.exists() or not ckpt_path.exists():
+            continue
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = _json.load(f)
+        except Exception:
+            continue
+        tc = cfg.get("training_config", cfg)
+        model_type = tc.get("model_type", "?")
+        loss_type = tc.get("loss_type", "")
+        fm = cfg.get("final_metrics") or {}
+        dice = fm.get("best_val_dice")
+        parts = [d.name, model_type]
+        if loss_type:
+            parts.append(loss_type)
+        if dice is not None:
+            parts.append(f"Dice={dice:.4f}")
+        else:
+            desc = cfg.get("description", "")
+            dice_match = re.search(r"best_val_dice=([\d.]+)", desc)
+            if dice_match:
+                parts.append(f"Dice={dice_match.group(1)}")
+        label = "  |  ".join(parts)
+        results.append((label, d))
+    return results
 
 
 class MainWindow(QMainWindow):
@@ -315,7 +365,7 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         self.browse_btn = QPushButton("Browse Folder")
         self.browse_btn.clicked.connect(self._on_browse)
-        self.example_btn = QPushButton("Load case-30")
+        self.example_btn = QPushButton("Load Ziv Example")
         self.example_btn.clicked.connect(self._on_load_example)
         btn_row.addWidget(self.browse_btn)
         btn_row.addWidget(self.example_btn)
@@ -326,6 +376,20 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.path_input)
 
         left_layout.addWidget(input_group)
+
+        model_group = QGroupBox("Model Selection")
+        model_layout = QVBoxLayout(model_group)
+        self.model_combo = QComboBox()
+        for label, path in discover_models():
+            self.model_combo.addItem(label, userData=path)
+        self.model_combo.currentIndexChanged.connect(self._on_model_selected)
+        model_layout.addWidget(self.model_combo)
+        self.model_detail = QLabel("")
+        self.model_detail.setStyleSheet("font-size: 11px; color: #6B7280; padding: 2px;")
+        self.model_detail.setWordWrap(True)
+        model_layout.addWidget(self.model_detail)
+        left_layout.addWidget(model_group)
+        self._update_model_detail()
 
         action_row = QHBoxLayout()
 
@@ -845,15 +909,44 @@ class MainWindow(QMainWindow):
 
     def _on_load_example(self):
         self.path_input.setText(
-            str(Path(__file__).resolve().parent / "data" / "ziv" / "case-30")
+            str(Path(__file__).resolve().parent / "data" / "ziv" / "exampleCase.zarr")
         )
+
+    def _on_model_selected(self, index):
+        self._update_model_detail()
+
+    def _update_model_detail(self):
+        model_path = self.model_combo.currentData()
+        if model_path is None:
+            self.model_detail.setText("No models found")
+            return
+        cfg_path = model_path / "run_config.json"
+        try:
+            with open(cfg_path, "r") as f:
+                cfg = _json.load(f)
+            tc = cfg.get("training_config", cfg)
+            parts = [f"Type: {tc.get('model_type', '?')}"]
+            if tc.get("loss_type"):
+                parts.append(f"Loss: {tc['loss_type']}")
+            fm = cfg.get("final_metrics") or {}
+            dice = fm.get("best_val_dice")
+            if dice is not None:
+                parts.append(f"Best Dice: {dice:.4f}")
+            else:
+                desc = cfg.get("description", "")
+                dice_match = re.search(r"best_val_dice=([\d.]+)", desc)
+                if dice_match:
+                    parts.append(f"Best Dice: {dice_match.group(1)}")
+            self.model_detail.setText("  |  ".join(parts))
+        except Exception:
+            self.model_detail.setText("Could not read model config")
 
     def _on_run(self):
         input_path = self.path_input.text().strip()
         if not input_path:
             QMessageBox.warning(
                 self, "No Input",
-                "Please enter a path to a DICOM folder or NIfTI file.",
+                "Please enter a path to a DICOM folder, NIfTI file, or preprocessed .zarr.",
             )
             return
 
@@ -882,10 +975,12 @@ class MainWindow(QMainWindow):
         self.json_text.clear()
         self.slice_viewer.clear_data()
 
+        selected_model = self.model_combo.currentData()
         self._worker = PipelineWorker(
             input_path,
             enable_postprocess=self.pp_checkbox.isChecked(),
             enable_refinement=self.refine_checkbox.isChecked(),
+            model_dir=str(selected_model) if selected_model else None,
         )
         self._worker.stage_update.connect(self._on_stage_update)
         self._worker.finished.connect(self._on_pipeline_finished)
@@ -1064,11 +1159,12 @@ class MainWindow(QMainWindow):
 
 def main():
     print("Stenosis Detection Desktop App (PyQt)")
-    print("Model directory:", MODEL_DIR)
     print("Temp directory:", TEMP_DIR)
 
-    if not MODEL_DIR.exists():
-        print("WARNING: model dir not found:", MODEL_DIR)
+    available_models = discover_models()
+    print(f"Found {len(available_models)} model(s)")
+    if not available_models:
+        print("WARNING: no valid models found in models/")
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

@@ -4,6 +4,7 @@
   "description": "MONAI 3D U-Net model",
   "training_config": {
     "model_type": "UNet",
+    "loss_type": "DiceBCE",
     "in_channels": 1,
     "out_channels": 1,
     "channels": [32, 64, 128, 256, 512],

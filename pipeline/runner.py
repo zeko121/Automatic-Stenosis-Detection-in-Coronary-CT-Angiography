@@ -36,7 +36,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 
 def detect_input_type(input_path):
-    """Return 'dicom', 'nifti', or 'unknown'."""
+    """Return 'dicom', 'nifti', 'zarr', or 'unknown'."""
     path = Path(input_path)
 
     if path.is_file():
@@ -46,6 +46,16 @@ def detect_input_type(input_path):
             return 'dicom'
 
     if path.is_dir():
+        # check for preprocessed zarr before DICOM (zarr dirs can contain misc files)
+        if path.suffix.lower() == '.zarr' and (path / '.zgroup').is_file():
+            try:
+                import zarr as _zarr
+                store = _zarr.open_group(str(path), mode='r')
+                if 'image' in store:
+                    return 'zarr'
+            except Exception:
+                pass
+
         dcm_files = list(path.glob('**/*.dcm')) + list(path.glob('**/*.DCM'))
         if dcm_files:
             return 'dicom'
@@ -163,10 +173,12 @@ def generate_clinical_report(case_name, findings_data, analysis_time):
     return "\n".join(report_lines)
 
 
-def pipeline_stages(input_path, enable_postprocess=True, enable_refinement=False):
+def pipeline_stages(input_path, enable_postprocess=True, enable_refinement=False,
+                     model_dir=None):
     """Generator that yields (stage_idx, state, status_lines, result) per stage."""
+    model_dir = Path(model_dir) if model_dir else MODEL_DIR
     start_time = time.time()
-    case_name = Path(input_path).stem if Path(input_path).is_file() else Path(input_path).name
+    case_name = Path(input_path).stem
 
     case_temp = TEMP_DIR / f"{case_name}_{int(time.time())}"
     case_temp.mkdir(exist_ok=True)
@@ -188,64 +200,70 @@ def pipeline_stages(input_path, enable_postprocess=True, enable_refinement=False
 
         if input_type == 'unknown':
             yield (-1, "error", status_lines,
-                   ("Error: Could not detect input type. Please provide a DICOM folder or NIfTI file.", "{}", "", None, None, None))
+                   ("Error: Could not detect input type. Please provide a DICOM folder, NIfTI file, or preprocessed .zarr.", "{}", "", None, None, None))
             return
 
-        yield (0, "running", status_lines, None)
-        if input_type == 'dicom':
-            log("\nconverting DICOM to NIfTI...")
+        if input_type == 'zarr':
+            log("\ninput is preprocessed .zarr — skipping conversion + preprocessing")
+            zarr_path = Path(input_path)
+            yield (0, "done", status_lines, None)
+            yield (1, "done", status_lines, None)
+        else:
+            yield (0, "running", status_lines, None)
+            if input_type == 'dicom':
+                log("\nconverting DICOM to NIfTI...")
 
-            nifti_path = case_temp / f"{case_name}.nii.gz"
-            result = dicom_to_nifti.process(input_path, str(nifti_path))
+                nifti_path = case_temp / f"{case_name}.nii.gz"
+                result = dicom_to_nifti.process(input_path, str(nifti_path))
+
+                if result.get("status") != "success":
+                    yield (-1, "error", status_lines,
+                           (f"Error in DICOM conversion: {result.get('error', 'Unknown error')}", "{}", "", None))
+                    return
+
+                log(f"  Shape: {result['output_shape']}, Time: {result.get('runtime_sec', 0):.1f}s")
+                if result.get("quality_warnings"):
+                    for warning in result["quality_warnings"]:
+                        log(f"  WARNING: {warning}")
+                log("converting DICOM to NIfTI... \u2713")
+                nifti_file = nifti_path
+            else:
+                log("\ninput is NIfTI, skipping conversion... \u2713")
+                if Path(input_path).is_dir():
+                    nii_files = list(Path(input_path).glob('*.nii*'))
+                    if not nii_files:
+                        yield (-1, "error", status_lines,
+                               ("Error: No NIfTI files found in folder", "{}", "", None))
+                        return
+                    nifti_file = nii_files[0]
+                else:
+                    nifti_file = Path(input_path)
+            yield (0, "done", status_lines, None)
+
+            yield (1, "running", status_lines, None)
+            log("\npreprocessing (HU window, resample, z-score)...")
+
+            zarr_path = case_temp / f"{case_name}.zarr"
+            model_config_path = model_dir / "run_config.json"
+            result = preprocess.process(
+                str(nifti_file), str(zarr_path), str(model_config_path), verbose=False
+            )
 
             if result.get("status") != "success":
                 yield (-1, "error", status_lines,
-                       (f"Error in DICOM conversion: {result.get('error', 'Unknown error')}", "{}", "", None))
+                       (f"Error in preprocessing: {result.get('error', 'Unknown error')}", "{}", "", None, None, None))
                 return
 
-            log(f"  Shape: {result['output_shape']}, Time: {result.get('runtime_sec', 0):.1f}s")
-            if result.get("quality_warnings"):
-                for warning in result["quality_warnings"]:
-                    log(f"  WARNING: {warning}")
-            log("converting DICOM to NIfTI... \u2713")
-            nifti_file = nifti_path
-        else:
-            log("\ninput is NIfTI, skipping conversion... \u2713")
-            if Path(input_path).is_dir():
-                nii_files = list(Path(input_path).glob('*.nii*'))
-                if not nii_files:
-                    yield (-1, "error", status_lines,
-                           ("Error: No NIfTI files found in folder", "{}", "", None))
-                    return
-                nifti_file = nii_files[0]
-            else:
-                nifti_file = Path(input_path)
-        yield (0, "done", status_lines, None)
-
-        yield (1, "running", status_lines, None)
-        log("\npreprocessing (HU window, resample, z-score)...")
-
-        zarr_path = case_temp / f"{case_name}.zarr"
-        model_config_path = MODEL_DIR / "run_config.json"
-        result = preprocess.process(
-            str(nifti_file), str(zarr_path), str(model_config_path), verbose=False
-        )
-
-        if result.get("status") != "success":
-            yield (-1, "error", status_lines,
-                   (f"Error in preprocessing: {result.get('error', 'Unknown error')}", "{}", "", None, None, None))
-            return
-
-        log(f"  Shape: {result.get('final_shape', result.get('output_shape', 'unknown'))}, Time: {result.get('runtime_sec', result.get('elapsed_seconds', 0)):.1f}s")
-        log("preprocessing... \u2713")
-        yield (1, "done", status_lines, None)
+            log(f"  Shape: {result.get('final_shape', result.get('output_shape', 'unknown'))}, Time: {result.get('runtime_sec', result.get('elapsed_seconds', 0)):.1f}s")
+            log("preprocessing... \u2713")
+            yield (1, "done", status_lines, None)
 
         yield (2, "running", status_lines, None)
         log("\nrunning vessel segmentation...")
 
         segmented_path = case_temp / f"{case_name}_segmented.zarr"
         result = segment.process(
-            str(zarr_path), str(segmented_path), str(MODEL_DIR),
+            str(zarr_path), str(segmented_path), str(model_dir),
             patch_size=(160, 160, 160), overlap=0.5, verbose=False
         )
 
@@ -278,7 +296,7 @@ def pipeline_stages(input_path, enable_postprocess=True, enable_refinement=False
                 refine_result = refine_mask(
                     image_volume=_refine_image,
                     prediction_mask=_seg_mask,
-                    model_dir=str(MODEL_DIR),
+                    model_dir=str(model_dir),
                     gap_model_dir=str(GAP_MODEL_DIR),
                     main_model_probs=_main_probs,
                 )
@@ -445,16 +463,16 @@ def pipeline_stages(input_path, enable_postprocess=True, enable_refinement=False
 
 
 def run_pipeline(input_path, progress=None, enable_postprocess=True,
-                 enable_refinement=False):
+                 enable_refinement=False, model_dir=None):
     """Run the full pipeline synchronously (non-generator wrapper)."""
 
     if not input_path or not input_path.strip():
-        return "Error: Please enter a path to a DICOM folder or NIfTI file.", "{}", "", None
+        return "Error: Please enter a path to a DICOM folder, NIfTI file, or preprocessed .zarr.", "{}", "", None
 
     result = None
     for _stage_idx, _state, _lines, res in pipeline_stages(
         input_path, enable_postprocess=enable_postprocess,
-        enable_refinement=enable_refinement,
+        enable_refinement=enable_refinement, model_dir=model_dir,
     ):
         if res is not None:
             result = res

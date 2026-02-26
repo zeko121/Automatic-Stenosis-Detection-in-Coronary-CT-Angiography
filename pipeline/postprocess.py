@@ -27,7 +27,7 @@ class PostprocessConfig:
     voxel_spacing_mm: float = 0.5
 
     # hole filling -- 4 iters fills gaps up to ~2mm
-    enable_hole_filling: bool = True
+    enable_hole_filling: bool = False
     closing_iterations: int = 4
 
     enable_smoothing: bool = False
