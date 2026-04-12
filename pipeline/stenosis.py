@@ -1,5 +1,5 @@
 """
-Stenosis detection from centerline data. Classification into
+stenosis detection from centerline data - classifies findings into
 Normal/Mild/Moderate/Severe based on clinical thresholds.
 """
 
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class StenosisFinding:
+    """single stenosis finding"""
     segment_id: int
     location_idx: int
     location_mm: float
@@ -36,27 +37,47 @@ class StenosisFinding:
 
 @dataclass
 class StenosisConfig:
-    normal_threshold: float = 0.25       # <25% Normal, 25-50% Mild, 50-70% Moderate, >=70% Severe
+    """thresholds and paramters for stenosis detection"""
+    # severity thresholds
+    normal_threshold: float = 0.25
     mild_threshold: float = 0.50
     moderate_threshold: float = 0.70
 
-    reference_percentile: float = 75.0
-    smoothing_sigma: float = 1.0
+    reference_percentile: float = 80.0
+    smoothing_sigma: float = 0.5
     min_segment_points: int = 5
     min_stenosis_length_mm: float = 1.0
 
+    # bifurcation suppression
     bifurcation_suppression_mm: float = 2.0
     bifurcation_radius_factor: float = 1.5
 
+    # reference calculation
     reference_exclude_ends_mm: float = 2.0
 
-    endpoint_taper_distance_mm: float = 4.0
+    # endpoint tapering
+    endpoint_taper_distance_mm: float = 6.0
     endpoint_taper_fraction: float = 0.05
 
+    # merge nearby
     stenosis_merge_distance_mm: float = 2.0
+
+    # artifact filters
+    max_radius_drop_rate: float = 0.5
+    artifact_radius_floor_mm: float = 0.55
+    min_radius_floor_mm: float = 0.25
+    min_radius_floor_seg_len: float = 20.0
+
+    # extreme narrowing filter
+    max_extreme_narrowing_ratio: float = 0.25
+    extreme_narrowing_min_seg_len: float = 40.0
+
+    # confidence gate
+    min_confidence: float = 0.60
 
 
 class StenosisDetector:
+    """walks through centerline segments and flags stenosis regions"""
 
     def __init__(self, config=None):
         self.config = config or StenosisConfig()
@@ -86,6 +107,7 @@ class StenosisDetector:
             return min(1.0, base * (0.7 + 0.3 * length_factor))
 
     def _filter_endpoint_tapering(self, findings, segment_length_mm):
+        """remove findings near segment endpoints"""
         threshold = max(
             self.config.endpoint_taper_distance_mm,
             segment_length_mm * self.config.endpoint_taper_fraction
@@ -94,7 +116,74 @@ class StenosisDetector:
                 if f.location_mm > threshold
                 and f.location_mm < (segment_length_mm - threshold)]
 
+    def _filter_artifact_drops(self, findings, radii_smooth, arc_lengths_mm):
+        """filter steep radius drops (probably segmentation gaps)"""
+        # real stenosis drops gradually over several mm
+        # segmentation gaps drop abruptly (high gradient)
+        filtered = []
+        for f in findings:
+            idx = f.location_idx
+            # gradient check in 5pt window around the stenosis peak
+            window = 5
+            start = max(0, idx - window)
+            end = min(len(radii_smooth), idx + window + 1)
+
+            local_radii = radii_smooth[start:end]
+            local_arc = arc_lengths_mm[start:end]
+
+            if len(local_arc) < 3:
+                filtered.append(f)
+                continue
+
+            radius_diffs = np.abs(np.diff(local_radii))
+            arc_diffs = np.diff(local_arc)
+            arc_diffs = np.maximum(arc_diffs, 0.01)
+            gradients = radius_diffs / arc_diffs
+            max_gradient = float(np.max(gradients))
+
+            if (max_gradient > self.config.max_radius_drop_rate
+                    and f.min_radius_mm < self.config.artifact_radius_floor_mm):
+                logger.debug(
+                    f"Segment {f.segment_id}: filtered artifact drop "
+                    f"(gradient={max_gradient:.2f}, min_r={f.min_radius_mm:.3f}mm)"
+                )
+                continue
+            filtered.append(f)
+        return filtered
+
+    def _filter_radius_floor(self, findings):
+        """remove findings with impossibly low radius in major segments"""
+        filtered = []
+        for f in findings:
+            if (f.min_radius_mm < self.config.min_radius_floor_mm
+                    and f.segment_length_mm > self.config.min_radius_floor_seg_len):
+                logger.debug(
+                    f"Segment {f.segment_id}: filtered radius floor "
+                    f"(min_r={f.min_radius_mm:.3f}mm, seg_len={f.segment_length_mm:.1f}mm)"
+                )
+                continue
+            filtered.append(f)
+        return filtered
+
+    def _filter_extreme_narrowing(self, findings):
+        """filter extreme radius ratio in long segments"""
+        # catches smooth gaps where gradient filter doesnt trigger
+        # if min/ref ratio is too low in a long segment, its probably artifact
+        filtered = []
+        for f in findings:
+            ratio = f.min_radius_mm / f.reference_radius_mm if f.reference_radius_mm > 0 else 1.0
+            if (ratio < self.config.max_extreme_narrowing_ratio
+                    and f.segment_length_mm > self.config.extreme_narrowing_min_seg_len):
+                logger.debug(
+                    f"Segment {f.segment_id}: filtered extreme narrowing "
+                    f"(ratio={ratio:.3f}, seg_len={f.segment_length_mm:.1f}mm)"
+                )
+                continue
+            filtered.append(f)
+        return filtered
+
     def _merge_nearby_stenoses(self, findings):
+        """merge findings where gap between end and start is small"""
         if len(findings) <= 1:
             return findings
 
@@ -129,11 +218,18 @@ class StenosisDetector:
         start_is_bifurcation=False,
         end_is_bifurcation=False,
     ):
+        """analyze one segment for stenosis
+
+        walks along the centerline, computes stenosis % at each point relative
+        to a reference radius, then groups consecutive narrowed points into
+        regions and reports the worst point in each region.
+        """
         n_points = len(radii_mm)
         if n_points < self.config.min_segment_points:
             logger.debug(f"Segment {segment_id}: skipped (only {n_points} points)")
             return []
 
+        # smooth radii
         if n_points >= 3 and self.config.smoothing_sigma > 0:
             radii_smooth = gaussian_filter1d(radii_mm, sigma=self.config.smoothing_sigma)
         else:
@@ -141,6 +237,7 @@ class StenosisDetector:
 
         arc = np.array(arc_lengths_mm)
 
+        # bifurcation suppression
         suppress_mask = np.zeros(n_points, dtype=bool)
         if start_is_bifurcation:
             suppress_mask |= (arc < self.config.bifurcation_suppression_mm)
@@ -151,6 +248,7 @@ class StenosisDetector:
         if local_median > 0:
             suppress_mask |= (radii_smooth > local_median * self.config.bifurcation_radius_factor)
 
+        # reference radius
         ref_exclude = self.config.reference_exclude_ends_mm
         valid_ref_mask = (arc >= ref_exclude) & (arc <= segment_length_mm - ref_exclude)
         valid_radii = radii_smooth[valid_ref_mask & ~suppress_mask]
@@ -168,9 +266,13 @@ class StenosisDetector:
             logger.debug(f"Segment {segment_id}: skipped (reference radius too small: {reference_radius:.3f}mm)")
             return []
 
+        # stenosis curve: how much narrower than reference at each point
+        # 0% = same as reference, 50% = half the radius, etc
         stenosis_pct = np.clip((1.0 - radii_smooth / reference_radius) * 100.0, 0, 100)
         stenosis_pct[suppress_mask] = 0
 
+        # region based detection - find contiguous runs above threshold
+        # each run becomes one potential finding
         stenosis_binary = (stenosis_pct >= self.config.normal_threshold * 100).astype(int)
         labeled, n_regions = scipy_label(stenosis_binary)
 
@@ -224,12 +326,25 @@ class StenosisDetector:
             )
             findings.append(finding)
 
+        # endpoint filter
         findings = self._filter_endpoint_tapering(findings, segment_length_mm)
+
+        # artifact filters
+        findings = self._filter_artifact_drops(findings, radii_smooth, arc)
+        findings = self._filter_radius_floor(findings)
+        findings = self._filter_extreme_narrowing(findings)
+
+        # merge nearby
         findings = self._merge_nearby_stenoses(findings)
 
         return findings
 
     def detect(self, centerline_data, artery_labels=None):
+        """run detection across all segments
+
+        loops through every segment in the vessel tree, runs analyze_segment
+        on each, then applies confidence filtering and sorts by severity.
+        """
         vessel_tree = centerline_data.get("vessel_tree", {})
         segments = vessel_tree.get("segments", {})
         nodes_dict = vessel_tree.get("nodes", {})
@@ -267,6 +382,7 @@ class StenosisDetector:
                 end_is_bifurcation=end_is_bif,
             )
 
+            # attach artery labels
             if artery_labels and seg_id in artery_labels:
                 label = artery_labels[seg_id]
                 for f in findings:
@@ -275,10 +391,15 @@ class StenosisDetector:
 
             all_findings.extend(findings)
 
+        # confidence gate
+        if self.config.min_confidence > 0:
+            all_findings = [f for f in all_findings
+                           if f.confidence >= self.config.min_confidence]
+
+        # sort by severity
         all_findings.sort(key=lambda f: f.stenosis_percent, reverse=True)
 
         return all_findings
-
 
 
 def process(
@@ -287,6 +408,7 @@ def process(
     config=None,
     artery_labels=None,
 ):
+    """load centerline json, detect stenosis, save results"""
     start_time = time.time()
     logger.info(f"Processing stenosis detection: {input_path}")
 
@@ -302,6 +424,7 @@ def process(
 
     findings = detector.detect(centerline_data, artery_labels=artery_labels)
 
+    # tally severity counts
     severity_counts = {"Normal": 0, "Mild": 0, "Moderate": 0, "Severe": 0}
     for f in findings:
         severity_counts[f.severity] += 1

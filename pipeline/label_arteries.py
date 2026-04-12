@@ -1,8 +1,9 @@
 """
-Label coronary arteries via connected-component analysis of the vessel mask.
+label coronary arteries using connected components from the vessel mask.
 
-Classifies left vs right coronary by x-position in RAS space, then
-attempts LAD/LCx split at the first major bifurcation.
+finds connected blobs, figures out which centerline segments live in which blob,
+then classifies biggest blobs as left vs right by x-position. also tries to
+split the left side into LAD/LCx at the first big bifurcaiton.
 """
 
 import logging
@@ -21,11 +22,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ArteryLabel:
+    """label for a single vessel segment"""
     segment_id: int
-    artery_name: str          # e.g. "Left Coronary", "Right Coronary", "LAD"
-    region: str = ""          # "proximal", "mid", "distal", or ""
+    artery_name: str
+    region: str = ""
     full_name: str = ""
-    tree_side: str = ""       # "left" or "right"
+    tree_side: str = ""
     confidence: float = 0.0
     reason: str = ""
 
@@ -35,6 +37,7 @@ class ArteryLabel:
 
 @dataclass
 class LabelingResult:
+    """everything that comes out of the labeling pipeline"""
     labels: dict = field(default_factory=dict)
     left_ostium: list = None
     right_ostium: list = None
@@ -58,8 +61,8 @@ class LabelingResult:
 
 
 def map_segments_to_components(centerline_data, vessel_mask):
-    """Map each centerline segment to a connected component by midpoint lookup."""
-    struct = generate_binary_structure(3, 3)  # 26-connectivity
+    """map each centerline segment to a connected component via midpoint lookup"""
+    struct = generate_binary_structure(3, 3)
     labeled_mask, n_components = scipy_label(
         (vessel_mask > 0).astype(np.uint8), structure=struct
     )
@@ -79,6 +82,7 @@ def map_segments_to_components(centerline_data, vessel_mask):
         pts_arr = np.array(pts, dtype=float)
         n_pts = len(pts_arr)
 
+        # try midpoint
         mid_idx = n_pts // 2
         mid_vox = np.round(pts_arr[mid_idx]).astype(int)
         comp_label = _safe_lookup(labeled_mask, mid_vox)
@@ -87,6 +91,7 @@ def map_segments_to_components(centerline_data, vessel_mask):
             seg_to_comp[sid] = int(comp_label)
             continue
 
+        # fallback: 3 point majority
         sample_indices = [n_pts // 4, n_pts // 2, 3 * n_pts // 4]
         votes = []
         for idx in sample_indices:
@@ -105,7 +110,7 @@ def map_segments_to_components(centerline_data, vessel_mask):
 
 
 def _safe_lookup(labeled_mask, voxel):
-    """Look up voxel in labeled mask; returns 0 if out of bounds."""
+    """lookup voxel in mask, 0 if oob"""
     shape = labeled_mask.shape
     if (voxel >= 0).all() and voxel[0] < shape[0] and voxel[1] < shape[1] and voxel[2] < shape[2]:
         return int(labeled_mask[voxel[0], voxel[1], voxel[2]])
@@ -113,17 +118,23 @@ def _safe_lookup(labeled_mask, voxel):
 
 
 def classify_components(labeled_mask, n_components):
-    """Classify components as left/right coronary by mean x-position in RAS."""
+    """classify components as left/right coronary by x-position in RAS
+
+    in RAS orientation, the x-axis points to patient's right side.
+    so lower x-index in the array = patient right = right coronary,
+    higher x-index = patient left = left coronary.
+    """
     if n_components == 0:
         return {}
 
     sizes = np.bincount(labeled_mask.ravel())
-    sizes[0] = 0  # ignore background
+    sizes[0] = 0
     total_voxels = sizes.sum()
 
     if total_voxels == 0:
         return {}
 
+    # 5% threshold for significant
     min_significant = max(1, int(total_voxels * 0.05))
 
     significant = []
@@ -148,7 +159,7 @@ def classify_components(labeled_mask, n_components):
         result[significant[0]] = "Coronary"
         return result
 
-    # lower x in RAS = patient-left = left coronary
+    # in RAS array: lower x-index = patient-right = right coronary
     comp_mean_x = {}
     for comp_label in significant:
         coords = np.argwhere(labeled_mask == comp_label)
@@ -156,12 +167,13 @@ def classify_components(labeled_mask, n_components):
 
     sorted_comps = sorted(significant, key=lambda c: comp_mean_x[c])
 
-    result[sorted_comps[0]] = "Left Coronary"
-    result[sorted_comps[-1]] = "Right Coronary"
+    result[sorted_comps[0]] = "Right Coronary"
+    result[sorted_comps[-1]] = "Left Coronary"
 
+    # middle components go to whichever is closer
     if len(sorted_comps) > 2:
-        left_x = comp_mean_x[sorted_comps[0]]
-        right_x = comp_mean_x[sorted_comps[-1]]
+        right_x = comp_mean_x[sorted_comps[0]]
+        left_x = comp_mean_x[sorted_comps[-1]]
         for comp_label in sorted_comps[1:-1]:
             cx = comp_mean_x[comp_label]
             if abs(cx - left_x) <= abs(cx - right_x):
@@ -178,7 +190,13 @@ def merge_nearby_components(
     distance_threshold_mm=8.0,
     spacing_mm=0.5,
 ):
-    """Merge nearby components (same-system fragments are typically 3-15mm apart)."""
+    """merge components whose surfaces are close together
+
+    fragmented vessels from the same system are usually 3-15mm apart,
+    while left-to-right distance is 30-50mm. so 8mm threshold works well
+    to reconnect fragments without merging left and right systems.
+    uses union-find for efficient merging.
+    """
     if n_components <= 1:
         return labeled_mask, n_components
 
@@ -197,6 +215,7 @@ def merge_nearby_components(
 
     distance_threshold_vox = distance_threshold_mm / spacing_mm
 
+    # subsample for speed
     max_sample = 2000
     comp_coords = {}
     for comp_label in significant:
@@ -207,6 +226,7 @@ def merge_nearby_components(
             coords = coords[idx]
         comp_coords[comp_label] = coords
 
+    # union find
     parent = {c: c for c in significant}
 
     def find(x):
@@ -231,7 +251,7 @@ def merge_nearby_components(
     for i, ca in enumerate(significant):
         for cb in significant[i + 1:]:
             if find(ca) == find(cb):
-                continue  # already merged
+                continue
             dists, _ = trees[ca].query(comp_coords[cb], k=1)
             min_dist = dists.min()
             if min_dist < distance_threshold_vox:
@@ -243,6 +263,7 @@ def merge_nearby_components(
     if len(roots) == len(significant):
         return labeled_mask, n_components
 
+    # relabel
     new_mask = labeled_mask.copy()
     label_remap = {}
     for comp_label in significant:
@@ -264,7 +285,7 @@ def merge_nearby_components(
 
 
 def _remap_segments_after_merge(seg_to_comp, labeled_mask, centerline_data):
-    """Re-lookup segment->component after relabeling."""
+    """re-lookup segment->component after relabeling"""
     vessel_tree = centerline_data.get("vessel_tree", {})
     segments = vessel_tree.get("segments", {})
     new_seg_to_comp = {}
@@ -305,6 +326,7 @@ def _remap_segments_after_merge(seg_to_comp, labeled_mask, centerline_data):
 
 @dataclass
 class RootedNode:
+    """node in the rooted vessel tree"""
     node_id: int
     position: np.ndarray
     radius_mm: float
@@ -315,7 +337,7 @@ class RootedNode:
 
 
 def build_rooted_tree(centerline_data, root_position, spacing_mm=0.5):
-    """BFS from nearest node to root_position, building parent-child tree."""
+    """bfs from nearest node to root_position"""
     vessel_tree = centerline_data.get("vessel_tree", {})
     nodes = vessel_tree.get("nodes", {})
     segments = vessel_tree.get("segments", {})
@@ -379,6 +401,7 @@ def build_rooted_tree(centerline_data, root_position, spacing_mm=0.5):
 
 
 def find_segment_for_node(node_id, segments):
+    """find which segment contains a node"""
     for seg_id_str, seg in segments.items():
         if node_id in seg.get("node_ids", []):
             return int(seg_id_str)
@@ -386,7 +409,7 @@ def find_segment_for_node(node_id, segments):
 
 
 def find_major_bifurcation(rooted_tree, root_id, min_child_ratio=0.35):
-    """Walk from root to first node where 2+ children have substantial radius."""
+    """walk from root until 2+ children have substantial radius"""
     current = root_id
     visited = set()
 
@@ -419,7 +442,7 @@ def find_major_bifurcation(rooted_tree, root_id, min_child_ratio=0.35):
 
 
 def get_direction_vector(rooted_tree, start_id, max_steps=20):
-    """Direction from start_id going distally (follows largest-radius child)."""
+    """direction from start going distally"""
     positions = [rooted_tree[start_id].position.copy()]
     current = start_id
     for _ in range(max_steps):
@@ -442,6 +465,7 @@ def get_direction_vector(rooted_tree, start_id, max_steps=20):
 
 
 def _collect_subtree_nodes(rooted_tree, start_id):
+    """get all node ids in subtree rooted at start_id"""
     nodes = set()
     queue = deque([start_id])
     while queue:
@@ -457,7 +481,7 @@ def _collect_subtree_nodes(rooted_tree, start_id):
 
 
 def assign_regions(labels, segments, rooted_tree, spacing_mm=0.5):
-    """Assign proximal/mid/distal based on arc-length fraction."""
+    """assign proximal/mid/distal based on arc position"""
     artery_segments = {}
     for sid, label in labels.items():
         artery_segments.setdefault(label.artery_name, []).append(sid)
@@ -515,8 +539,21 @@ def assign_regions(labels, segments, rooted_tree, spacing_mm=0.5):
             labels[sid].full_name = f"{region} {labels[sid].artery_name}"
 
 
-def _try_lad_lcx_split(centerline_data, left_segment_ids, labels, spacing_mm=0.5):
-    """Best-effort LAD/LCx split using direction vectors at the first bifurcation."""
+def _try_lad_lcx_split(centerline_data, left_segment_ids, labels, spacing_mm=0.5, vessel_mask=None):
+    """lad/lcx split via junction graph instead of full centerline
+
+    algorithm overview:
+    1. build a graph of segment junctions (endpoints only, not all centerline pts)
+    2. find LM root: the endpoint with highest z (most superior point)
+    3. walk from root, at each step try to reconnect nearby junctions if
+       theres a path through the vessel mask
+    4. at bifurcations, check if 2+ branches are "major" (>= 10mm subtree)
+       - if yes: this is the LAD/LCx split point
+       - if no: absorb minor branches as LM, keep walking
+    5. classify LAD vs LCx by y-direction (LAD goes anterior = lower y)
+    6. label remaining segments by y-position relative to bifurcation
+    7. fix borderline segments using neighbor connectivity
+    """
     vessel_tree = centerline_data.get("vessel_tree", {})
     nodes = vessel_tree.get("nodes", {})
     segments = vessel_tree.get("segments", {})
@@ -524,115 +561,286 @@ def _try_lad_lcx_split(centerline_data, left_segment_ids, labels, spacing_mm=0.5
     if not left_segment_ids or not nodes:
         return
 
-    left_node_ids = set()
-    for sid in left_segment_ids:
-        seg = segments.get(str(sid), {})
-        left_node_ids.update(seg.get("node_ids", []))
-
-    if not left_node_ids:
-        return
-
-    best_radius = -1.0
-    best_pos = None
-    for nid in left_node_ids:
-        node = nodes.get(str(nid), {})
-        is_ep = node.get("is_endpoint", False)
-        radius = node.get("radius_mm", 0)
-        if is_ep and radius > best_radius:
-            best_radius = radius
-            best_pos = node.get("position", None)
-
-    if best_pos is None:
-        return
-
-    root_pos = np.array(best_pos, dtype=float)
-
-    tree = build_rooted_tree(centerline_data, root_pos, spacing_mm)
-    if not tree:
-        return
-
-    root_id = min(tree.keys(), key=lambda k: tree[k].depth)
-
-    bif_id = find_major_bifurcation(tree, root_id)
-    if bif_id is None:
-        return
-
-    bif_node = tree[bif_id]
-    children = bif_node.children
-    if len(children) < 2:
-        return
-
-    child_info = []
-    for child_id in children:
-        direction = get_direction_vector(tree, child_id)
-        radius = tree[child_id].radius_mm
-        child_info.append((child_id, direction, radius))
-
-    child_info.sort(key=lambda x: x[2], reverse=True)
-
-    c0_id, c0_dir, _ = child_info[0]
-    c1_id, c1_dir, _ = child_info[1]
-
-    # LAD goes more anterior (higher y in RAS)
-    score_0 = c0_dir[1] - c0_dir[2] * 0.5
-    score_1 = c1_dir[1] - c1_dir[2] * 0.5
-
-    if score_0 >= score_1:
-        lad_root, lcx_root = c0_id, c1_id
-    else:
-        lad_root, lcx_root = c1_id, c0_id
-
-    lad_nodes = _collect_subtree_nodes(tree, lad_root)
-    lcx_nodes = _collect_subtree_nodes(tree, lcx_root)
-
-    lm_nodes = set()
-    current = root_id
-    visited_path = set()
-    while current is not None:
-        if current in visited_path:
-            break
-        visited_path.add(current)
-        lm_nodes.add(current)
-        if current == bif_id:
-            break
-        ch = tree[current].children
-        if not ch:
-            break
-        current = max(ch, key=lambda c: tree[c].radius_mm)
+    # build segment-level adjacency
+    left_seg_set = set(left_segment_ids)
+    junction_adj = {}
+    seg_junctions = {}
 
     for sid in left_segment_ids:
         seg = segments.get(str(sid), {})
-        seg_nids = set(seg.get("node_ids", []))
+        nids = seg.get("node_ids", [])
+        if len(nids) < 2:
+            continue
+        j_start, j_end = nids[0], nids[-1]
+        seg_junctions[sid] = (j_start, j_end)
+        junction_adj.setdefault(j_start, []).append((sid, j_end))
+        junction_adj.setdefault(j_end, []).append((sid, j_start))
 
-        lm_overlap = len(seg_nids & lm_nodes)
-        lad_overlap = len(seg_nids & lad_nodes)
-        lcx_overlap = len(seg_nids & lcx_nodes)
+    if not junction_adj:
+        return
 
-        best_overlap = max(lm_overlap, lad_overlap, lcx_overlap)
-        if best_overlap == 0:
+    # reconnect on demand
+    merge_dist_mm = 8.0
+
+    all_junc_pos = {jid: np.array(nodes[str(jid)]["position"], dtype=float)
+                    for jid in junction_adj}
+
+    def _line_inside_mask(pos_a, pos_b, mask_vol):
+        """check if line stays inside vessel mask
+
+        samples points along the line and checks each is in mask.
+        prevents reconnecting through empty space.
+        """
+        n_samples = max(3, int(np.linalg.norm(pos_b - pos_a)))
+        for t in np.linspace(0, 1, n_samples):
+            pt = pos_a + t * (pos_b - pos_a)
+            idx = tuple(np.clip(np.round(pt).astype(int), 0,
+                               np.array(mask_vol.shape) - 1))
+            if mask_vol[idx] == 0:
+                return False
+        return True
+
+    _vessel_mask = vessel_mask
+
+    def _try_reconnect(from_jid, walked_set):
+        """connect to nearby unvisited junctions through vessel mask
+
+        called at each step of the walk to bridge gaps in the centerline.
+        only connects if theres a valid path through vessel mask.
+        """
+        from_pos = all_junc_pos[from_jid]
+        existing_neighbors = {other for _, other in junction_adj.get(from_jid, [])}
+        connected = []
+        for jid, pos in all_junc_pos.items():
+            if jid in walked_set or jid == from_jid or jid in existing_neighbors:
+                continue
+            dist = np.linalg.norm(from_pos - pos) * spacing_mm
+            if dist >= merge_dist_mm:
+                continue
+            if _vessel_mask is not None and _line_inside_mask(from_pos, pos, _vessel_mask):
+                junction_adj[from_jid].append((-1, jid))
+                junction_adj[jid].append((-1, from_jid))
+                existing_neighbors.add(jid)
+                connected.append(jid)
+                logger.debug("LAD/LCx split: on-demand reconnect %d <-> %d (%.1fmm, inside vessel)",
+                             from_jid, jid, dist)
+        return connected[0] if connected else None
+
+    # find LM root - highest z endpoint
+    endpoints = []
+    for jid in junction_adj:
+        if len(junction_adj[jid]) == 1:
+            pos = np.array(nodes.get(str(jid), {}).get("position", [0, 0, 0]), dtype=float)
+            endpoints.append((jid, pos))
+
+    if not endpoints:
+        return
+
+    root_jid = max(endpoints, key=lambda x: x[1][0])[0]
+
+    # walk from root toward the LAD/LCx bifurcation
+    # a branch is "major" if its subtree is at least 10mm total length
+    min_major_length_mm = 10.0
+
+    def _subtree_stats(start_jid, from_jid):
+        """dfs to measure subtree length and check for downstream bifurcations"""
+        total_length = 0.0
+        n_junctions = 0
+        vis = {from_jid}
+        stack = [start_jid]
+        while stack:
+            jid = stack.pop()
+            if jid in vis:
+                continue
+            vis.add(jid)
+            n_junctions += 1
+            for sid, other in junction_adj.get(jid, []):
+                if other in vis:
+                    continue
+                if sid >= 0:
+                    total_length += segments.get(str(sid), {}).get("length_mm", 0)
+                stack.append(other)
+        return total_length, n_junctions >= 3
+
+    lm_path_segs = set()
+    lm_path_nodes = {root_jid}
+    current_jid = root_jid
+    bif_jid = None
+    bif_branches = []
+    walked = {root_jid}
+
+    for _ in range(50):
+        _try_reconnect(current_jid, walked)
+
+        neighbors = [(sid, other) for sid, other in junction_adj.get(current_jid, [])
+                     if other not in walked]
+        if not neighbors:
+            break
+
+        if len(neighbors) == 1:
+            sid, next_jid = neighbors[0]
+            if sid >= 0:
+                lm_path_segs.add(sid)
+            lm_path_nodes.add(next_jid)
+            walked.add(next_jid)
+            current_jid = next_jid
             continue
 
-        if lm_overlap == best_overlap and lm_overlap > len(seg_nids) * 0.3:
+        # multiple branches
+        branch_stats = []
+        for sid, other_jid in neighbors:
+            if sid >= 0:
+                first_seg_len = segments.get(str(sid), {}).get("length_mm", 0)
+                real_degree = len([s for s, _ in junction_adj.get(other_jid, []) if s >= 0])
+                if first_seg_len < min_major_length_mm and real_degree <= 1:
+                    branch_stats.append((sid, other_jid, first_seg_len, False, False))
+                    continue
+            length, has_bif = _subtree_stats(other_jid, current_jid)
+            is_major = length >= min_major_length_mm
+            branch_stats.append((sid, other_jid, length, has_bif, is_major))
+
+        major_branches = [(sid, other, length) for sid, other, length, has_bif, is_major
+                          in branch_stats if is_major]
+
+        if len(major_branches) >= 2:
+            bif_jid = current_jid
+            for sid, other_jid, length in major_branches:
+                if sid >= 0:
+                    avg_r = np.mean(segments.get(str(sid), {}).get("radii_mm", [0]))
+                else:
+                    avg_r = nodes.get(str(other_jid), {}).get("radius_mm", 0)
+                bif_branches.append((sid, other_jid, avg_r))
+            break
+        else:
+            for sid, other, length, has_bif, is_major in branch_stats:
+                if not is_major:
+                    if sid >= 0:
+                        lm_path_segs.add(sid)
+                    lm_path_nodes.add(other)
+                    walked.add(other)
+
+            if len(major_branches) == 1:
+                sid, next_jid, _ = major_branches[0]
+                if sid >= 0:
+                    lm_path_segs.add(sid)
+                lm_path_nodes.add(next_jid)
+                walked.add(next_jid)
+                current_jid = next_jid
+            else:
+                if branch_stats:
+                    best = max(branch_stats, key=lambda x: x[2])
+                    sid, next_jid = best[0], best[1]
+                    if sid >= 0:
+                        lm_path_segs.add(sid)
+                    lm_path_nodes.add(next_jid)
+                    walked.add(next_jid)
+                else:
+                    break
+                current_jid = next_jid
+
+    if bif_jid is None:
+        logger.debug("LAD/LCx split: no bifurcation with 2+ major branches found")
+        return
+
+    bif_pos = np.array(nodes[str(bif_jid)]["position"], dtype=float)
+    logger.debug("LAD/LCx split: bifurcation at node %d, %d branches", bif_jid, len(bif_branches))
+
+    # classify by y direction
+    bif_branches.sort(key=lambda x: x[2], reverse=True)
+    top_two = bif_branches[:2]
+
+    branch_dirs = []
+    for sid, child_jid, avg_r in top_two:
+        if sid >= 0:
+            seg = segments.get(str(sid), {})
+            pts = np.array(seg.get("centerline_points", []))
+            if len(pts) < 5:
+                continue
+            nids = seg.get("node_ids", [])
+            if nids[0] == bif_jid:
+                direction = pts[min(20, len(pts) - 1)] - pts[0]
+            else:
+                direction = pts[max(0, len(pts) - 21)] - pts[-1]
+        else:
+            target_pos = np.array(nodes.get(str(child_jid), {}).get("position", [0, 0, 0]), dtype=float)
+            direction = target_pos - bif_pos
+        norm = np.linalg.norm(direction)
+        if norm > 0:
+            direction = direction / norm
+        branch_dirs.append((sid, child_jid, direction, avg_r))
+
+    if len(branch_dirs) < 2:
+        return
+
+    # LAD runs anteriorly (lower y in RAS), LCx wraps posteriorly (higher y)
+    # compare the y-component of each branch's direction vector
+    d0_y = branch_dirs[0][2][1]
+    d1_y = branch_dirs[1][2][1]
+
+    if d0_y <= d1_y:
+        lad_branch_sid = branch_dirs[0][0]
+        lcx_branch_sid = branch_dirs[1][0]
+    else:
+        lad_branch_sid = branch_dirs[1][0]
+        lcx_branch_sid = branch_dirs[0][0]
+
+    logger.debug("LAD/LCx split: LAD=seg %d (y=%.2f), LCx=seg %d (y=%.2f)",
+                 lad_branch_sid, min(d0_y, d1_y), lcx_branch_sid, max(d0_y, d1_y))
+
+    # label LM
+    lm_segs = lm_path_segs
+
+    for sid in left_segment_ids:
+        if sid in lm_segs:
             labels[sid].artery_name = "LM"
-            labels[sid].tree_side = "left"
+            labels[sid].full_name = "LM"
             labels[sid].confidence = 0.7
             labels[sid].reason = "Left main (root to first bifurcation)"
-        elif lad_overlap == best_overlap and lad_overlap > len(seg_nids) * 0.3:
-            labels[sid].artery_name = "LAD"
-            labels[sid].tree_side = "left"
-            labels[sid].confidence = 0.7
-            labels[sid].reason = "LAD (anterior branch at LM bifurcation)"
-        elif lcx_overlap == best_overlap and lcx_overlap > len(seg_nids) * 0.3:
-            labels[sid].artery_name = "LCx"
-            labels[sid].tree_side = "left"
-            labels[sid].confidence = 0.7
-            labels[sid].reason = "LCx (lateral branch at LM bifurcation)"
 
-    combined_labels = {sid: labels[sid] for sid in left_segment_ids if labels[sid].artery_name in ("LM", "LAD", "LCx")}
-    if combined_labels:
-        assign_regions(combined_labels, segments, tree, spacing_mm)
-        for sid, lbl in combined_labels.items():
-            labels[sid] = lbl
+    # assign LAD/LCx by y position
+    split_y = bif_pos[1]
+
+    for sid in left_segment_ids:
+        if sid in lm_segs:
+            continue
+        seg = segments.get(str(sid), {})
+        pts = seg.get("centerline_points", [])
+        if not pts:
+            continue
+        mid_y = pts[len(pts) // 2][1] if len(pts[0]) > 1 else 0
+        if mid_y <= split_y:
+            labels[sid].artery_name = "LAD"
+            labels[sid].full_name = "LAD"
+            labels[sid].confidence = 0.7
+            labels[sid].reason = "LAD (anterior of bifurcation)"
+        else:
+            labels[sid].artery_name = "LCx"
+            labels[sid].full_name = "LCx"
+            labels[sid].confidence = 0.7
+            labels[sid].reason = "LCx (posterior of bifurcation)"
+
+    # fix borderline segments by neigbor connectivity
+    # if ALL neighbors have the opposite label, flip this segment
+    # catches edge cases where y-position alone got it wrong
+    for sid in left_segment_ids:
+        if sid in lm_segs:
+            continue
+        current_name = labels[sid].artery_name
+        if current_name not in ("LAD", "LCx"):
+            continue
+        nids = segments.get(str(sid), {}).get("node_ids", [])
+        if len(nids) < 2:
+            continue
+        neighbor_labels = set()
+        for jid in [nids[0], nids[-1]]:
+            for nsid, _ in junction_adj.get(jid, []):
+                if nsid >= 0 and nsid != sid and nsid in left_seg_set and nsid not in lm_segs:
+                    neighbor_labels.add(labels[nsid].artery_name)
+        other = "LCx" if current_name == "LAD" else "LAD"
+        if neighbor_labels == {other}:
+            labels[sid].artery_name = other
+            labels[sid].full_name = other
+            labels[sid].reason = f"{other} (corrected by neighbor connectivity)"
 
     logger.info("LAD/LCx split: %d LM, %d LAD, %d LCx segments",
                 sum(1 for s in left_segment_ids if labels[s].artery_name == "LM"),
@@ -648,7 +856,14 @@ def label_arteries(
     verbose=True,
     distance_threshold_mm=8.0,
 ):
-    """Classify segments into coronary arteries via connected components."""
+    """main labeling function - classifies segments via connected componets
+
+    pipeline:
+    1. map each centerline segment to a connected component in vessel mask
+    2. merge nearby components (fixes fragmented vessels)
+    3. classify components as left/right by x-position
+    4. try LAD/LCx split on left side
+    """
     t0 = time.time()
     result = LabelingResult()
     vessel_tree = centerline_data.get("vessel_tree", {})
@@ -675,7 +890,7 @@ def label_arteries(
         return result
 
     if verbose:
-        logger.info("mapping segments to components...")
+        logger.info("mapping segments to vessel mask components...")
 
     seg_to_comp, labeled_mask, n_components = map_segments_to_components(
         centerline_data, vessel_mask
@@ -697,7 +912,7 @@ def label_arteries(
                      n_components, len(seg_to_comp))
 
     if verbose:
-        logger.info("classifying left vs right...")
+        logger.info("classifying components (left vs right)...")
 
     comp_names = classify_components(labeled_mask, n_components)
 
@@ -706,7 +921,7 @@ def label_arteries(
             logger.info("  component %d -> %s", cl, name)
 
     if verbose:
-        logger.info("assigning labels...")
+        logger.info("assigning labels to segments...")
 
     left_segment_ids = []
     right_segment_ids = []
@@ -752,12 +967,14 @@ def label_arteries(
         )
         result.tree_sides[sid] = tree_side or "unknown"
 
+    # try lad/lcx split
     if left_segment_ids:
         if verbose:
             logger.info("attempting LAD/LCx split on %d left-system segments...",
                          len(left_segment_ids))
         try:
-            _try_lad_lcx_split(centerline_data, left_segment_ids, result.labels, spacing_mm)
+            _try_lad_lcx_split(centerline_data, left_segment_ids, result.labels, spacing_mm,
+                               vessel_mask=vessel_mask)
         except Exception as e:
             logger.debug("LAD/LCx split failed (non-fatal): %s", e)
 
@@ -783,7 +1000,7 @@ def process(
     spacing_mm=0.5,
     verbose=True,
 ):
-    """Load data, run labeling, save results."""
+    """pipeline entry point - loads data, runs labeling, saves results"""
     t0 = time.time()
     centerline_path = Path(centerline_path)
     output_path = Path(output_path)
